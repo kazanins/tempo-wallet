@@ -3,6 +3,7 @@
 import { IPhoneFrame } from '@/components/iphone-frame'
 import { AuthScreen } from '@/components/auth-screen'
 import { DashboardScreen } from '@/components/dashboard-screen'
+import { config } from '@/lib/wagmi'
 import { useAccount, useConnect, useDisconnect, useReadContract, usePublicClient } from 'wagmi'
 import { useEffect, useState } from 'react'
 import { formatUnits, parseAbiItem, parseUnits, pad, stringToHex, type Address } from 'viem'
@@ -31,7 +32,7 @@ interface Transaction {
 
 export default function Home() {
   const { address, isConnected } = useAccount()
-  const { connectors, connect, isPending } = useConnect()
+  const { connectors, connect, isPending } = useConnect({ config })
   const { disconnect } = useDisconnect()
   const [mounted, setMounted] = useState(false)
   const [transactions, setTransactions] = useState<Transaction[]>([])
@@ -79,7 +80,7 @@ export default function Home() {
     if (webAuthnConnector) {
       connect({
         connector: webAuthnConnector,
-        withCapabilities: true
+        capabilities: { type: 'sign-up' }
       })
     }
   }
