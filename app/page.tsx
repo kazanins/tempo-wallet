@@ -79,7 +79,7 @@ export default function Home() {
     if (webAuthnConnector) {
       connect({
         connector: webAuthnConnector,
-        capabilities: { type: 'sign-up' }
+        withCapabilities: true
       })
     }
   }
