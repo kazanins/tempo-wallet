@@ -6,7 +6,7 @@ import { DashboardScreen } from '@/components/dashboard-screen'
 import { config } from '@/lib/wagmi'
 import { useAccount, useConnect, useDisconnect, useReadContract, usePublicClient } from 'wagmi'
 import { useEffect, useState } from 'react'
-import { formatUnits, parseAbiItem, parseUnits, pad, stringToHex, type Address } from 'viem'
+import { formatUnits, hexToString, parseAbiItem, parseUnits, pad, stringToHex, type Address } from 'viem'
 import { Hooks } from 'tempo.ts/wagmi'
 
 const ALPHA_USD_ADDRESS = '0x20c0000000000000000000000000000000000001' as const
@@ -26,6 +26,7 @@ interface Transaction {
   type: 'sent' | 'received'
   amount: string
   address: string
+  memo?: string
   timestamp: string
   blockNumber: bigint
 }
@@ -43,7 +44,7 @@ export default function Home() {
   // Transfer mutation for sending payments
   const sendPayment = Hooks.token.useTransferSync()
 
-  const { data: balanceData, isLoading: isLoadingBalance } = useReadContract({
+  const { data: balanceData, isLoading: isLoadingBalance, refetch: refetchBalance } = useReadContract({
     address: ALPHA_USD_ADDRESS,
     abi: ERC20_ABI,
     functionName: 'balanceOf',
@@ -58,11 +59,12 @@ export default function Home() {
     ? formatUnits(balanceData, 6) // AlphaUSD has 6 decimals
     : '0.00'
 
+  const numericBalance = Number(balance)
   const formattedBalance = isLoadingBalance
     ? 'Loading...'
-    : Number(balance).toLocaleString('en-US', {
-        minimumFractionDigits: 2,
-        maximumFractionDigits: 2
+    : numericBalance.toLocaleString('en-US', {
+        minimumFractionDigits: numericBalance >= 1000 ? 0 : 2,
+        maximumFractionDigits: numericBalance >= 1000 ? 0 : 2
       })
 
   useEffect(() => {
@@ -147,6 +149,35 @@ export default function Home() {
         toBlock: 'latest',
       })
 
+      // Fetch memo logs (Tempo TIP-20: memo is indexed bytes32)
+      const memoEvent = parseAbiItem(
+        'event TransferWithMemo(address indexed from, address indexed to, uint256 amount, bytes32 indexed memo)'
+      )
+      const [sentMemoLogs, receivedMemoLogs] = await Promise.all([
+        publicClient.getLogs({
+          address: ALPHA_USD_ADDRESS,
+          event: memoEvent,
+          args: { from: address as Address },
+          fromBlock,
+          toBlock: 'latest',
+        }),
+        publicClient.getLogs({
+          address: ALPHA_USD_ADDRESS,
+          event: memoEvent,
+          args: { to: address as Address },
+          fromBlock,
+          toBlock: 'latest',
+        }),
+      ])
+      const memoLogs = [...sentMemoLogs, ...receivedMemoLogs]
+      const memoMap = new Map<string, string>()
+      for (const log of memoLogs) {
+        const memoHex = (log.args as { memo?: `0x${string}` }).memo
+        if (!memoHex) continue
+        const memoText = hexToString(memoHex, { size: 32 }).replace(/\0/g, '').trim()
+        if (memoText) memoMap.set(log.transactionHash, memoText)
+      }
+
       // Combine and deduplicate by transaction hash + log index
       const allLogs = [...sentLogs, ...receivedLogs]
       const uniqueLogs = Array.from(
@@ -168,6 +199,7 @@ export default function Home() {
             type: isSent ? 'sent' as const : 'received' as const,
             amount: Number(formatUnits(log.args.value || 0n, 6)).toFixed(2),
             address: isSent ? (log.args.to || '') : (log.args.from || ''),
+            memo: memoMap.get(log.transactionHash),
             timestamp: new Date(Number(block.timestamp) * 1000).toLocaleString(),
             blockNumber: log.blockNumber,
           }
@@ -207,6 +239,8 @@ export default function Home() {
           onSendPayment={handleSendPayment}
           isPaymentPending={sendPayment.isPending}
           explorerBaseUrl={explorerBaseUrl}
+          onRefreshTransactions={fetchTransactions}
+          onRefreshBalance={refetchBalance}
         />
       ) : (
         <AuthScreen
