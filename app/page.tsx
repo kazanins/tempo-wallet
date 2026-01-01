@@ -33,7 +33,7 @@ interface Transaction {
 
 export default function Home() {
   const { address, isConnected } = useAccount()
-  const { connectors, connect, isPending } = useConnect({ config })
+  const { connectors, connect, connectAsync, isPending } = useConnect({ config })
   const { disconnect } = useDisconnect()
   const [mounted, setMounted] = useState(false)
   const [transactions, setTransactions] = useState<Transaction[]>([])
@@ -67,6 +67,32 @@ export default function Home() {
         maximumFractionDigits: numericBalance >= 1000 ? 0 : 2
       })
 
+  const refreshBalanceUntilChange = async (startingBalance: bigint) => {
+    const maxAttempts = 10
+    const delayMs = 1200
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const result = await refetchBalance()
+      const nextBalance = result.data ?? startingBalance
+      if (nextBalance !== startingBalance) return
+      await new Promise((resolve) => setTimeout(resolve, delayMs))
+    }
+  }
+
+  const refreshTransactionsUntilChange = async (startingId?: string, targetAddress?: Address) => {
+    const maxAttempts = 10
+    const delayMs = 1200
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+      const nextTransactions = await fetchTransactions(targetAddress)
+      if (!nextTransactions) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs))
+        continue
+      }
+      if (!startingId && nextTransactions.length > 0) return
+      if (startingId && nextTransactions[0]?.id && nextTransactions[0]?.id !== startingId) return
+      await new Promise((resolve) => setTimeout(resolve, delayMs))
+    }
+  }
+
   useEffect(() => {
     setMounted(true)
   }, [])
@@ -78,12 +104,32 @@ export default function Home() {
 
   const webAuthnConnector = connectors.find(c => c.type === 'webAuthn')
 
-  const handleSignUp = () => {
+  const handleSignUp = async () => {
     if (webAuthnConnector) {
-      connect({
-        connector: webAuthnConnector,
-        capabilities: { type: 'sign-up' }
-      })
+      try {
+        const result = await connectAsync({
+          connector: webAuthnConnector,
+          capabilities: { type: 'sign-up' }
+        })
+        const account = result.accounts?.[0]
+        if (publicClient && account) {
+          const startingTxId =
+            address?.toLowerCase() === account.toLowerCase()
+              ? transactions[0]?.id
+              : undefined
+          const startingBalance = balanceData ?? 0n
+          await publicClient.request({
+            method: 'tempo_fundAddress',
+            params: [account],
+          })
+          await Promise.all([
+            refreshBalanceUntilChange(startingBalance),
+            refreshTransactionsUntilChange(startingTxId, account),
+          ])
+        }
+      } catch (error) {
+        console.error('Sign up failed:', error)
+      }
     }
   }
 
@@ -107,6 +153,7 @@ export default function Home() {
         token: ALPHA_USD_ADDRESS,
         memo: memo ? pad(stringToHex(memo), { size: 32 }) : undefined
       })
+      await refetchBalance()
       // Refetch transactions after successful payment
       if (address && isConnected && publicClient) {
         await fetchTransactions()
@@ -119,8 +166,9 @@ export default function Home() {
   }
 
   // Extract fetchTransactions to be reusable
-  const fetchTransactions = async () => {
-    if (!address || !isConnected || !publicClient) return
+  const fetchTransactions = async (targetAddress?: Address) => {
+    const activeAddress = targetAddress ?? address
+    if (!activeAddress || !publicClient || (!isConnected && !targetAddress)) return
 
     setIsLoadingTransactions(true)
     try {
@@ -132,7 +180,7 @@ export default function Home() {
         address: ALPHA_USD_ADDRESS,
         event: parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)'),
         args: {
-          from: address as Address,
+          from: activeAddress as Address,
         },
         fromBlock,
         toBlock: 'latest',
@@ -143,7 +191,7 @@ export default function Home() {
         address: ALPHA_USD_ADDRESS,
         event: parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)'),
         args: {
-          to: address as Address,
+          to: activeAddress as Address,
         },
         fromBlock,
         toBlock: 'latest',
@@ -157,14 +205,14 @@ export default function Home() {
         publicClient.getLogs({
           address: ALPHA_USD_ADDRESS,
           event: memoEvent,
-          args: { from: address as Address },
+          args: { from: activeAddress as Address },
           fromBlock,
           toBlock: 'latest',
         }),
         publicClient.getLogs({
           address: ALPHA_USD_ADDRESS,
           event: memoEvent,
-          args: { to: address as Address },
+          args: { to: activeAddress as Address },
           fromBlock,
           toBlock: 'latest',
         }),
@@ -190,9 +238,9 @@ export default function Home() {
       ).sort((a, b) => Number(b.blockNumber - a.blockNumber))
 
       const txs: Transaction[] = await Promise.all(
-        uniqueLogs.slice(0, 20).map(async (log) => {
+        uniqueLogs.slice(0, 50).map(async (log) => {
           const block = await publicClient.getBlock({ blockNumber: log.blockNumber })
-          const isSent = log.args.from?.toLowerCase() === address.toLowerCase()
+          const isSent = log.args.from?.toLowerCase() === activeAddress.toLowerCase()
 
           return {
             id: `${log.transactionHash}-${log.logIndex}`,
@@ -210,8 +258,10 @@ export default function Home() {
       const filteredTxs = txs.filter(tx => parseFloat(tx.amount) > 0)
 
       setTransactions(filteredTxs)
+      return filteredTxs
     } catch (error) {
       console.error('Error fetching transactions:', error)
+      return undefined
     } finally {
       setIsLoadingTransactions(false)
     }

@@ -39,6 +39,8 @@ export function DashboardScreen({ address, balance, transactions, onSignOut, onS
   const [copied, setCopied] = useState(false)
   const [activeTab, setActiveTab] = useState<'home' | 'pay' | 'discover' | 'settings'>('home')
   const [showPayScreen, setShowPayScreen] = useState(false)
+  const [highlightedTxId, setHighlightedTxId] = useState<string | null>(null)
+  const highlightTimerRef = useRef<number | null>(null)
   const [subscriptions, setSubscriptions] = useState<Record<string, {
     active: boolean
     expiresAt: number
@@ -116,11 +118,30 @@ export function DashboardScreen({ address, balance, transactions, onSignOut, onS
     },
   ]), [])
 
-  const subscriptionStorageKey = (serviceId: string) => `subscription:${serviceId}`
+  const subscriptionStorageKey = (serviceId: string, accountAddress?: string) => {
+    const prefix = accountAddress ? accountAddress.toLowerCase() : 'unknown'
+    return `subscription:${prefix}:${serviceId}`
+  }
 
   useEffect(() => {
     subscriptionsRef.current = subscriptions
   }, [subscriptions])
+
+  useEffect(() => {
+    if (highlightTimerRef.current) {
+      window.clearTimeout(highlightTimerRef.current)
+      highlightTimerRef.current = null
+    }
+
+    const newest = transactions[0]?.id
+    if (!newest) return
+
+    setHighlightedTxId(newest)
+    highlightTimerRef.current = window.setTimeout(() => {
+      setHighlightedTxId(null)
+      highlightTimerRef.current = null
+    }, 1800)
+  }, [transactions])
 
   const persistSubscription = async (serviceId: string, data: {
     expiresAt: number
@@ -131,8 +152,10 @@ export function DashboardScreen({ address, balance, transactions, onSignOut, onS
     keyAuthorization?: KeyAuthorization.Signed
     keyPair?: Awaited<ReturnType<typeof WebCryptoP256.createKeyPair>>
   }) => {
+    const accountAddress = walletClient?.account?.address
+    if (!accountAddress) return
     if (!data.keyPair || !data.keyAuthorization) return
-    await set(subscriptionStorageKey(serviceId), {
+    await set(subscriptionStorageKey(serviceId, accountAddress), {
       expiresAt: data.expiresAt,
       remainingLimit: data.remainingLimit,
       chargesRemaining: data.chargesRemaining,
@@ -194,19 +217,18 @@ export function DashboardScreen({ address, balance, transactions, onSignOut, onS
 
     const attemptTransfer = async (includeKeyAuthorization: boolean) => {
       if (!includeKeyAuthorization) {
-        await Actions.token.transfer(client, transferArgs)
-        return true
+        return Actions.token.transfer(client, transferArgs)
       }
-      await Actions.token.transfer(client, {
+      return Actions.token.transfer(client, {
         ...transferArgs,
         keyAuthorization: sub.keyAuthorization,
       } as never)
-      return true
     }
 
     try {
       const usedKeyAuth = !sub.keyAuthorized
-      await attemptTransfer(usedKeyAuth)
+      const hash = await attemptTransfer(usedKeyAuth)
+      await publicClient?.waitForTransactionReceipt({ hash })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       if (message.includes('InsufficientBalance')) {
@@ -228,12 +250,31 @@ export function DashboardScreen({ address, balance, transactions, onSignOut, onS
         }))
         return
       }
+      if (message.includes('KeyAlreadyRevoked')) {
+        const accountAddress = walletClient?.account?.address
+        if (accountAddress) {
+          await del(subscriptionStorageKey(service.id, accountAddress))
+        }
+        setSubscriptions((prev) => ({
+          ...prev,
+          [service.id]: {
+            ...prev[service.id],
+            active: false,
+            overdue: false,
+          },
+        }))
+        return
+      }
 
       try {
-        await attemptTransfer(sub.keyAuthorized ?? false)
+        const hash = await attemptTransfer(sub.keyAuthorized ?? false)
+        await publicClient?.waitForTransactionReceipt({ hash })
       } catch (retryError) {
         console.error('Subscription charge failed:', retryError)
-        await del(subscriptionStorageKey(service.id))
+        const accountAddress = walletClient?.account?.address
+        if (accountAddress) {
+          await del(subscriptionStorageKey(service.id, accountAddress))
+        }
         setSubscriptions((prev) => ({
           ...prev,
           [service.id]: {
@@ -250,7 +291,10 @@ export function DashboardScreen({ address, balance, transactions, onSignOut, onS
     const nextKeyAuthorized = true
 
     if (nextCharges === 0) {
-      await del(subscriptionStorageKey(service.id))
+      const accountAddress = walletClient?.account?.address
+      if (accountAddress) {
+        await del(subscriptionStorageKey(service.id, accountAddress))
+      }
       setSubscriptions((prev) => ({
         ...prev,
         [service.id]: {
@@ -286,8 +330,14 @@ export function DashboardScreen({ address, balance, transactions, onSignOut, onS
   }
 
   useEffect(() => {
+    if (!walletClient?.account) {
+      setSubscriptions({})
+      return
+    }
+
+    setSubscriptions({})
+
     const loadSubscriptions = async () => {
-      if (!walletClient?.account) return
 
       const entries: Record<string, {
         active: boolean
@@ -300,11 +350,11 @@ export function DashboardScreen({ address, balance, transactions, onSignOut, onS
       }> = {}
 
       for (const service of services) {
-        const stored = await get(subscriptionStorageKey(service.id))
+        const stored = await get(subscriptionStorageKey(service.id, walletClient.account.address))
         if (!stored || !stored.keyPair || !stored.keyAuthorization) continue
 
         if (stored.expiresAt <= Date.now() || stored.chargesRemaining <= 0) {
-          await del(subscriptionStorageKey(service.id))
+          await del(subscriptionStorageKey(service.id, walletClient.account.address))
           continue
         }
 
@@ -320,11 +370,11 @@ export function DashboardScreen({ address, balance, transactions, onSignOut, onS
           }
         } catch (error) {
           console.error('Failed to restore access key:', error)
-          await del(subscriptionStorageKey(service.id))
+          await del(subscriptionStorageKey(service.id, walletClient.account.address))
         }
       }
 
-      setSubscriptions((prev) => ({ ...prev, ...entries }))
+      setSubscriptions(entries)
     }
 
     loadSubscriptions()
@@ -349,7 +399,10 @@ export function DashboardScreen({ address, balance, transactions, onSignOut, onS
         const amountUnits = parseUnits(String(service.price), TOKEN_DECIMALS)
 
         if (sub.expiresAt <= now || sub.remainingLimit < amountUnits || sub.chargesRemaining <= 0) {
-          await del(subscriptionStorageKey(service.id))
+          const accountAddress = walletClient?.account?.address
+          if (accountAddress) {
+            await del(subscriptionStorageKey(service.id, accountAddress))
+          }
           setSubscriptions((prev) => ({
             ...prev,
             [service.id]: {
@@ -402,7 +455,7 @@ export function DashboardScreen({ address, balance, transactions, onSignOut, onS
       } catch (error) {
         console.error('Failed to revoke access key:', error)
       }
-      await del(subscriptionStorageKey(serviceId))
+      await del(subscriptionStorageKey(serviceId, walletClient.account.address))
       setSubscriptions((prev) => ({
         ...prev,
         [serviceId]: {
@@ -631,7 +684,9 @@ export function DashboardScreen({ address, balance, transactions, onSignOut, onS
                 transactions.map((tx) => (
                   <div
                     key={tx.id}
-                    className="flex items-center justify-between py-3 border-b border-gray-100"
+                    className={`flex items-center justify-between py-3 border-b border-gray-100 transition-colors ${
+                      highlightedTxId === tx.id ? 'bg-blue-50 animate-pulse' : ''
+                    }`}
                   >
                     <div className="flex items-center space-x-3">
                       <div className="w-10 h-10 bg-gray-100 rounded-full flex items-center justify-center">
