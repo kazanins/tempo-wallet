@@ -118,7 +118,7 @@ export default function Home() {
               ? transactions[0]?.id
               : undefined
           const startingBalance = balanceData ?? 0n
-          await publicClient.request({
+          await (publicClient as unknown as { request: (args: { method: string; params?: unknown[] }) => Promise<unknown> }).request({
             method: 'tempo_fundAddress',
             params: [account],
           })
@@ -289,7 +289,7 @@ export default function Home() {
           onSendPayment={handleSendPayment}
           isPaymentPending={sendPayment.isPending}
           explorerBaseUrl={explorerBaseUrl}
-          onRefreshTransactions={fetchTransactions}
+          onRefreshTransactions={() => fetchTransactions().then(() => undefined)}
           onRefreshBalance={refetchBalance}
         />
       ) : (

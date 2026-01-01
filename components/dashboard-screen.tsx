@@ -455,7 +455,9 @@ export function DashboardScreen({ address, balance, transactions, onSignOut, onS
       } catch (error) {
         console.error('Failed to revoke access key:', error)
       }
-      await del(subscriptionStorageKey(serviceId, walletClient.account.address))
+      if (walletClient?.account?.address) {
+        await del(subscriptionStorageKey(serviceId, walletClient.account.address))
+      }
       setSubscriptions((prev) => ({
         ...prev,
         [serviceId]: {
