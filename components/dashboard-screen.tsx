@@ -10,7 +10,7 @@ import type { KeyAuthorization } from 'ox/tempo'
 import { Address } from 'ox'
 import { del, get, set } from 'idb-keyval'
 
-const ALPHA_USD_ADDRESS = '0x20c0000000000000000000000000000000000001'
+const ALPHA_USD_ADDRESS = '0x20c0000000000000000000000000000000000001' as const
 const TOKEN_DECIMALS = 6
 const ACCOUNT_KEYCHAIN_ADDRESS = getAddress('0xAAAAAAAA00000000000000000000000000000000')
 
@@ -200,7 +200,7 @@ export function DashboardScreen({ address, balance, transactions, onSignOut, onS
       await Actions.token.transfer(client, {
         ...transferArgs,
         keyAuthorization: sub.keyAuthorization,
-      })
+      } as never)
       return true
     }
 
@@ -230,7 +230,7 @@ export function DashboardScreen({ address, balance, transactions, onSignOut, onS
       }
 
       try {
-        await attemptTransfer(sub.keyAuthorized)
+        await attemptTransfer(sub.keyAuthorized ?? false)
       } catch (retryError) {
         console.error('Subscription charge failed:', retryError)
         await del(subscriptionStorageKey(service.id))
@@ -423,7 +423,8 @@ export function DashboardScreen({ address, balance, transactions, onSignOut, onS
       const accessKey = Account.fromWebCryptoP256(keyPair, { access: walletClient.account })
       const expirySeconds = Math.floor(Date.now() / 1000) + 13 * 60
       const limitUnits = parseUnits(String(service.price * 12), TOKEN_DECIMALS)
-      const keyAuthorization = await walletClient.account.signKeyAuthorization(
+      const rootAccount = walletClient.account as Account.RootAccount
+      const keyAuthorization = await rootAccount.signKeyAuthorization(
         { accessKeyAddress: accessKey.accessKeyAddress, keyType: accessKey.keyType },
         {
           expiry: expirySeconds,
