@@ -10,6 +10,9 @@ import { formatUnits, hexToString, parseAbiItem, parseUnits, pad, stringToHex, t
 import { Hooks } from 'tempo.ts/wagmi'
 
 const ALPHA_USD_ADDRESS = '0x20c0000000000000000000000000000000000001' as const
+const TINY_FAUCET_URL = 'https://tiny-faucet.up.railway.app/api/fund' as const
+const TINY_FAUCET_TOKEN = 'AlphaUSD' as const
+const TINY_FAUCET_AMOUNT = 1000
 
 const ERC20_ABI = [
   {
@@ -40,6 +43,29 @@ export default function Home() {
   const [isLoadingTransactions, setIsLoadingTransactions] = useState(false)
   const publicClient = usePublicClient()
   const explorerBaseUrl = publicClient?.chain?.blockExplorers?.default?.url
+
+  const fundAccount = async (account: Address) => {
+    const response = await fetch(TINY_FAUCET_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        address: account,
+        token: TINY_FAUCET_TOKEN,
+        amount: TINY_FAUCET_AMOUNT,
+      }),
+    })
+
+    if (!response.ok) {
+      let details = ''
+      try {
+        details = JSON.stringify(await response.json())
+      } catch {
+        details = await response.text()
+      }
+      const suffix = details ? `: ${details}` : ''
+      throw new Error(`Faucet request failed (${response.status})${suffix}`)
+    }
+  }
 
   // Transfer mutation for sending payments
   const sendPayment = Hooks.token.useTransferSync()
@@ -118,10 +144,7 @@ export default function Home() {
               ? transactions[0]?.id
               : undefined
           const startingBalance = balanceData ?? 0n
-          await (publicClient as unknown as { request: (args: { method: string; params?: unknown[] }) => Promise<unknown> }).request({
-            method: 'tempo_fundAddress',
-            params: [account],
-          })
+          await fundAccount(account as Address)
           await Promise.all([
             refreshBalanceUntilChange(startingBalance),
             refreshTransactionsUntilChange(startingTxId, account),
